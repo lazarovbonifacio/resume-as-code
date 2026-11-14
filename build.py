@@ -122,10 +122,12 @@ def select_resume(data: dict, role: str, lang: str, include_ids: set | None = No
     exclude_ids = exclude_ids or set()
     p = data["profile"]
 
-    headlines = [b for b in data["headlines"] if matches(b, role, include_ids, exclude_ids)]
+    # Blocks forced via --blocks win over the default role block (only the first is used).
+    forced_first = lambda b: b["id"] not in (include_ids or ())
+    headlines = sorted((b for b in data["headlines"] if matches(b, role, include_ids, exclude_ids)), key=forced_first)
     headline = custom_title or (headlines[0]["fields"][lang] if headlines else role.upper())
 
-    summaries = [b for b in data["summaries"] if matches(b, role, include_ids, exclude_ids)]
+    summaries = sorted((b for b in data["summaries"] if matches(b, role, include_ids, exclude_ids)), key=forced_first)
     summary = summaries[0]["fields"][lang] if summaries else ""
 
     skills = [b["fields"][lang] for b in data["skills"] if matches(b, role, include_ids, exclude_ids)]
@@ -206,7 +208,7 @@ def render_markdown(r: dict) -> str:
         f"# {r['name']}",
         f"**{r['headline']}**  ",
         f"{r['location']} | {r['phone']} | {r['email']}  ",
-        f"[linkedin.com/in/lazarovbonifacio](https://{r['linkedin']}) | [github.com/lazarovbonifacio](https://{r['github']}) | [{r['website']}](https://{r['website']})",
+        f"[{r['linkedin']}](https://{r['linkedin']}) | [{r['github']}](https://{r['github']}) | [{r['website']}](https://{r['website']})",
         "",
         "---",
         "",
@@ -426,6 +428,59 @@ def write_pdf(res: dict, pdf_path: Path) -> int:
     return pages
 
 
+def render_cover_letter_html(md_text: str) -> str:
+    """Cover letter .md (line 1: '# Name', lines 2-3: contact, then paragraphs/bullets) -> HTML."""
+    lines = md_text.splitlines()
+    name = lines[0].lstrip("# ").strip()
+    contact = "".join(f'<div style="font-size:9.5pt;">{md_inline(l.strip())}</div>' for l in lines[1:3])
+    body, items = [], []
+    for l in lines[3:]:
+        if l.startswith("- "):
+            items.append(f'<li style="margin-bottom:3px;">{md_inline(l[2:])}</li>')
+            continue
+        if items:
+            body.append(f'<ul style="margin-top:2px;margin-bottom:6px;">{"".join(items)}</ul>')
+            items = []
+        if l.strip():
+            body.append(f'<p style="margin-top:0;margin-bottom:7px;text-align:justify;">{md_inline(l)}</p>')
+    if items:
+        body.append(f'<ul style="margin-top:2px;margin-bottom:6px;">{"".join(items)}</ul>')
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+  body {{ font-family: "Times New Roman", "Liberation Serif", Georgia, serif; font-size: 10.5pt; line-height: 1.25; color: #000; }}
+  a {{ color: #000; text-decoration: none; }}
+</style></head><body>
+  <div align="center"><div style="font-size:15pt;font-weight:bold;letter-spacing:0.5px;">{name.upper()}</div>{contact}</div>
+  <hr style="border:0;background-color:#000;height:1px;margin-top:4px;margin-bottom:10px;" />
+  {"".join(body)}
+</body></html>"""
+
+
+def write_cover_letter_pdf(md_path: Path) -> tuple[Path, int]:
+    """Render a cover letter .md to a 1-page PDF next to it, in the resume's typography."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtCore import QMarginsF, QSizeF
+    from PyQt6.QtGui import QGuiApplication, QPageLayout, QPageSize, QTextDocument
+    from PyQt6.QtPrintSupport import QPrinter
+
+    app = QGuiApplication.instance() or QGuiApplication(sys.argv)
+    pdf_path = md_path.with_suffix(".pdf")
+    printer = QPrinter(QPrinter.PrinterMode.ScreenResolution)
+    printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+    printer.setOutputFileName(str(pdf_path))
+    printer.setPageLayout(QPageLayout(
+        QPageSize(QPageSize.PageSizeId.A4), QPageLayout.Orientation.Portrait,
+        QMarginsF(18, 16, 18, 16), QPageLayout.Unit.Millimeter,
+    ))
+    doc = QTextDocument()
+    doc.setDocumentMargin(0)
+    doc.setHtml(render_cover_letter_html(md_path.read_text(encoding="utf-8")))
+    doc.setPageSize(QSizeF(printer.pageRect(QPrinter.Unit.DevicePixel).size()))
+    if doc.pageCount() > 1:
+        raise ValueError(f"{md_path.name} has {doc.pageCount()} pages; cover letters must fit on 1 page.")
+    doc.print(printer)
+    return pdf_path, doc.pageCount()
+
+
 def validate_bullet_formula(block_id: str, lang: str, text: str) -> None:
     """Verify bullet starts with **Action Verb** and has at least 3 bold segments (Verb, Metric/Achievement, Tools)."""
     assert text.startswith("**"), f"[{block_id}:{lang}] must start with **Action Verb**: {text[:40]}..."
@@ -453,7 +508,8 @@ def build_one(data: dict, role: str, lang: str, out_dir: Path, include_ids: set 
     res = select_resume(data, role, lang, include_ids, exclude_ids, custom_title)
     role_part = ROLE_FILENAMES.get(role, role.upper())
     comp_part = f"_{re.sub(r'[^A-Za-z0-9]+', '_', company).strip('_')}" if company else ""
-    stem = f"Resume_Lazaro_Bonifacio_{role_part}{comp_part}_{lang.upper()}"
+    name_part = re.sub(r"[^A-Za-z0-9]+", "_", res["name"]).strip("_")
+    stem = f"Resume_{name_part}_{role_part}{comp_part}_{lang.upper()}"
     md_path = out_dir / f"{stem}.md"
     pdf_path = out_dir / f"{stem}.pdf"
 
@@ -464,7 +520,11 @@ def build_one(data: dict, role: str, lang: str, out_dir: Path, include_ids: set 
 
 def run_check(master_path: Path) -> None:
     data = parse_master(master_path)
-    assert data["profile"].get("name") == "Lazaro Bonifacio", "Missing profile name"
+    assert data["profile"].get("name"), "Missing profile name"
+    if len(data["summaries"]) > 1:
+        forced = data["summaries"][-1]
+        got = select_resume(data, ROLES[0], "en_us", {forced["id"]}, set())["summary"]
+        assert got == forced["fields"]["en_us"], "--blocks summary must override the role default"
     assert len(data["career_break"]) >= 1, "Missing Career Break section"
 
     # Check bullet formula across all experience, career break, and project blocks
@@ -500,9 +560,17 @@ def main() -> None:
     ap.add_argument("--all", action="store_true", help="Build all roles x languages")
     ap.add_argument("--list", action="store_true", help="List all available Lego blocks and tags")
     ap.add_argument("--check", action="store_true", help="Run self-check assertions")
+    ap.add_argument("--cover-letter", metavar="MD", help="Render a cover letter .md into a 1-page PDF next to it")
     args = ap.parse_args()
 
+    if args.cover_letter:
+        pdf_p, pages = write_cover_letter_pdf(Path(args.cover_letter))
+        print(f"Built ({pages}p): {pdf_p}")
+        return
+
     master_path = Path(args.master)
+    if not master_path.exists():
+        sys.exit(f"{master_path} not found. Start from the template: cp master-template.md {master_path}")
     if args.check:
         run_check(master_path)
         return

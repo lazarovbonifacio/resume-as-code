@@ -14,6 +14,10 @@ Repositório organizado no formato de **blocos de montar** a partir de um único
 ## Uso Rápido
 
 ```bash
+# Primeira vez: dependência do PDF e seus dados (master.md fica fora do git)
+pip install PyQt6
+cp master-template.md master.md
+
 # Validar fórmula dos bullets, seção Career Break e limite de 2 páginas
 ./build.py --check
 
@@ -31,6 +35,10 @@ Repositório organizado no formato de **blocos de montar** a partir de um único
   --title "Senior Platform Infrastructure Engineer" \
   --blocks proj-asus \
   --exclude cb-cloud-transition,bd-infra
+
+# Gerar PDF (1 página, mesma tipografia) de uma cover letter em .md
+# Formato: linha 1 "# Nome", linhas 2-3 contato, depois parágrafos e bullets "- "
+./build.py --cover-letter dist/Cover_Letter_Exemplo.md
 
 # Listar todos os blocos disponíveis no master.md
 ./build.py --list
